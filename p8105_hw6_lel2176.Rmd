@@ -1,0 +1,201 @@
+---
+title: "p8105_hw5_lel2176"
+author: "Lauren Lazaro"
+date: "2023-12-01"
+output: github_document
+---
+
+```{r}
+library(tidyverse)
+library(rnoaa)
+library(janitor)
+library(MASS)
+library(modelr)
+```
+
+
+# Problem 2
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2022-01-01",
+    date_max = "2022-12-31") |>
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) |>
+   dplyr::select(name, id, everything())
+
+bootstraps = weather_df |> 
+  modelr::bootstrap(n = 5000) |> 
+  mutate(
+    model = map(strap, \(df) lm(tmax ~ tmin + prcp, data = df)),
+    result = map(model, broom::tidy),
+    r2 = map(model, broom::glance)) |> 
+  dplyr::select(result, r2) %>% unnest(r2) |> 
+  dplyr::select(result, r.squared) %>% unnest(result) |> 
+  dplyr::select(term, estimate, r.squared) 
+
+bootstraps |> 
+  filter(term == "(Intercept)") |> 
+  ggplot(aes(x = r.squared)) +
+  geom_density()
+
+CI = bootstraps |> 
+  filter(term == "(Intercept)") |> 
+  dplyr::select(r.squared) |> 
+  summarize(lower = quantile(r.squared, 0.025), 
+            upper = quantile(r.squared, 0.975))
+
+CI
+```
+
+The data is centered around 0.92 and is skewed to the left. We are 95% confident that the R-squared value is between `r CI$lower` and `r CI$upper`
+
+```{r}
+
+bootstraps |> 
+  pivot_wider(names_from = term, values_from = estimate) |>  
+  rename(b1 = tmin, 
+         b2 = prcp) |>  
+  mutate(logs = log(b1 * b2)) |>  
+  ggplot(aes(x = logs)) + 
+  geom_density()
+
+
+CI_b1b2 = bootstraps |> 
+  pivot_wider(names_from = term, values_from = estimate) |>  
+  rename(b1 = tmin, 
+         b2 = prcp) |>  
+  mutate(logs = log(b1 * b2)) |> 
+  summarize(NA_num = sum(is.na(logs)),
+            lower = quantile(logs, 0.025, na.rm = T), 
+            upper = quantile(logs, 0.975, na.rm = T))
+
+CI_b1b2
+```
+
+The data skewed to the left with a peak in between -6 and -5.
+
+
+# Problem 3
+
+
+```{r}
+birthweight =
+  read_csv("./data/birthweight.csv") |> 
+  mutate(
+    babysex = as.factor(babysex),
+    babysex = fct_recode(
+      babysex, 
+      "male" = "1", 
+      "female" = "2"
+      ),
+    frace = as.factor(frace),
+    frace = fct_recode(
+      frace, 
+      "white" = "1", 
+      "black" = "2", 
+      "asian" = "3", 
+                       
+      "puerto rican" = "4", 
+      "other" = "8"),
+    malform = as.logical(malform),
+    mrace = as.factor(mrace),
+    mrace = fct_recode(
+      mrace, 
+      "white" = "1", 
+      "black" = "2", 
+                       
+      "asian" = "3", 
+      "puerto rican" = "4")
+    ) |> 
+  drop_na()
+
+lm =
+  lm(bwt ~., data = birthweight)
+
+step =
+  stepAIC(lm, direction = "backward", trace = FALSE)
+
+step |> 
+  broom::tidy() |> 
+  knitr::kable()
+
+birthweight |>  
+  add_predictions(step) |>  
+  add_residuals(step) |>  
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point() +
+  labs(title = "Fitted Values Vs. Residual Values", 
+       x = "Fitted Values",
+       y = "Residual Values")
+
+comp1 =
+  lm(bwt ~ blength + gaweeks, data = birthweight) |> 
+  broom::tidy() |> 
+  knitr::kable()
+
+comp2 =
+  lm(bwt ~ bhead*blength*babysex, data = birthweight) |> 
+  broom::tidy() |> 
+  knitr::kable()
+
+CV =
+  crossv_mc(birthweight, 100) |> 
+  mutate(
+    test = map(test, as_tibble),
+    train = map(train, as_tibble) 
+    )
+
+comp_CV =
+  CV |>  
+  mutate(
+    mod1  = map(
+      train, 
+      ~lm(bwt ~ babysex + bhead + blength + delwt + fincome + 
+    gaweeks + mheight + mrace + parity + ppwt + smoken, data = .x)),
+    mod2  = map(train, ~lm(bwt ~ gaweeks + blength, data = .x)),
+    mod3  = map(train, ~lm(bwt ~ bhead*blength*babysex, data = .x))
+    ) |>  
+  mutate(
+    rmse1 = map2_dbl(mod1, test, ~rmse(model = .x, data = .y)),
+    rmse2  = map2_dbl(mod2, test, ~rmse(model = .x, data = .y)),
+    rmse3 = map2_dbl(mod3, test, ~rmse(model = .x, data = .y))
+    ) |>  
+  summarize(
+    avg_mod1 = mean(rmse1),
+    avg_mod2 = mean(rmse2),
+    avg_mod3 = mean(rmse3)
+    )
+
+comp_CV
+
+CV |>  
+  mutate(
+    mod1  = 
+      map(train, ~lm(bwt ~ babysex + bhead + blength + delwt + fincome + 
+                       gaweeks + mheight + mrace + parity + ppwt + smoken, 
+                     data = .x)),
+         mc1  = map(train, ~lm(bwt ~ gaweeks + blength, data = .x)),
+         mc2  = map(train, ~lm(bwt ~ bhead*blength*babysex, data = .x))
+    ) |>  
+  mutate(
+    rmse1 = map2_dbl(mod1, test, ~rmse(model = .x, data = .y)),
+         rc1  = map2_dbl(mc1, test, ~rmse(model = .x, data = .y)),
+         rc2 = map2_dbl(mc2, test, ~rmse(model = .x, data = .y))
+    ) |> 
+  dplyr::select(rmse1, rc1, rc2) |>   
+  pivot_longer(everything(),
+               names_to = "model", 
+               values_to = "rmse",
+               names_prefix = "rmse_") |> 
+  mutate(
+    model = fct_inorder(model)
+    ) |>  
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin(aes(fill = model))
+```
